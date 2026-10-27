@@ -20,10 +20,10 @@ class WebhookSignatureError(VulcanoError):
     """Firma HMAC-SHA256 no válida o ausente"""
     pass
 
-class WebhookTimestampError(ValueError):
+class WebhookTimestampError(VulcanoError):
     """Ataque de replay / timestamp fuera de tolerancia"""
     pass
 
-class WebhookDeliveryError(ValueError):
+class WebhookDeliveryError(VulcanoError):
     """Fallo de HTTP POST al emisor"""
     pass
