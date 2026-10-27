@@ -3,7 +3,7 @@ import re
 from urllib.parse import urlparse
 
 
-def validar_timeout(valor):
+def parse_wait_time(valor):
     try:
         val_float = float(valor)
     except ValueError:
