@@ -27,7 +27,3 @@ class WebhookTimestampError(ValueError):
 class WebhookDeliveryError(ValueError):
     """Fallo de HTTP POST al emisor"""
     pass
-
-class WebhookSignatureError(VulcanoError):
-    """Firma HMAC-SHA256 no válida o ausente"""
-    pass
