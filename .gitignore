@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.py[cod]
+logs/
+logs_test/
+logs_gzip_test/
+mensaje.json
