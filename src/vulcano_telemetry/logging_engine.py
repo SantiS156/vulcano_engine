@@ -181,25 +181,27 @@ class LoggingEngine:
 
         self.log_queue = queue.Queue(-1)
 
-        file_handler = RotatingFileHandler(
+
+        self.file_handler = RotatingFileHandler(
             filename=self.log_file,
             maxBytes=2 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
         )
-        file_handler.setFormatter(AsyncJSONFormatter())
-        file_handler.namer = _gzip_namer
-        file_handler.rotator = _gzip_rotator
+        self.file_handler.setFormatter(AsyncJSONFormatter())
+        self.file_handler.namer = _gzip_namer
+        self.file_handler.rotator = _gzip_rotator
 
         self.listener = QueueListener(
             self.log_queue,
-            file_handler,
+            self.file_handler,
             respect_handler_level=True,
         )
 
         self.logger = logging.getLogger("vulcano")
         self.logger.setLevel(level)
         self.logger.propagate = False
+
 
         # Evitar acumular handlers al inicializar varias veces.
         for handler in self.logger.handlers[:]:
@@ -233,11 +235,14 @@ class LoggingEngine:
 
             self.logger.removeHandler(self.queue_handler)
             self.queue_handler.close()
+            self.file_handler.close()
+
 
     def __enter__(self):
         self.start()
-        return self
+        return self.logger
 
     def __exit__(self, exc_type, exc_value, traceback_obj):
         self.stop()
+
 

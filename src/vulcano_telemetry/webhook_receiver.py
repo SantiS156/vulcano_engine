@@ -8,14 +8,18 @@ from .core_sqs import get_sqs_client, send_event
 
 app = FastAPI()
 
+
 def publicar_evento(event_data: dict):
     sqs_client = get_sqs_client()
-    queue_url = sqs_client.get_queue_url(QueueName="vulcano-events-queue")["QueueUrl"]
+    queue_url = sqs_client.get_queue_url(
+        QueueName="vulcano-webhooks-received"
+    )["QueueUrl"]
 
     send_event(
         sqs_client=sqs_client,
         queue_url=queue_url,
-        event_data=event_data,)
+        event_data=event_data,
+    )
 
 
 @app.post("/webhook", status_code=202)

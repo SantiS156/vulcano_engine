@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import time
+import uvicorn
 
 import requests
 
@@ -162,18 +163,30 @@ async def dispatch_webhook(
 async def produce_sqs(args, logger) -> None:
     """Publica un evento en la cola configurada."""
 
+    
     try:
-        import os
-
         message = args.message
 
         if message.startswith("@"):
-            with open(message[1:], "r", encoding="utf-8-sig") as file:
+            with open(
+                message[1:],
+                "r",
+                encoding="utf-8-sig",
+            ) as file:
                 message = file.read()
 
         event_data = json.loads(message)
+
     except json.JSONDecodeError as exc:
-        raise ValueError("El mensaje debe ser JSON válido.") from exc
+        raise ValueError(
+            "El mensaje debe ser JSON válido."
+        ) from exc
+
+    except OSError as exc:
+        raise ValueError(
+            f"No se pudo leer el archivo del evento: {exc}"
+        ) from exc
+
 
     if not isinstance(event_data, dict):
         raise ValueError("El evento JSON debe ser un objeto.")
@@ -199,10 +212,12 @@ async def produce_sqs(args, logger) -> None:
     print(f"Evento publicado. MessageId: {message_id}")
 
 
+
 async def start_dispatcher(args, logger) -> None:
     """Consume eventos y los entrega al destino HTTP."""
 
     client = get_sqs_client(args.endpoint)
+
     queue_url = client.get_queue_url(
         QueueName=args.queue
     )["QueueUrl"]
@@ -211,7 +226,7 @@ async def start_dispatcher(args, logger) -> None:
         "Despachador iniciado",
         extra={"QueueName": args.queue},
     )
-
+    
     while True:
         messages = await asyncio.to_thread(
             receive_events,
@@ -248,13 +263,7 @@ async def start_dispatcher(args, logger) -> None:
                     extra={"MessageId": message_id},
                 )
 
-            except (
-                json.JSONDecodeError,
-                ValueError,
-                WebhookDeliveryError,
-                WebhookSignatureError,
-                WebhookTimestampError,
-            ) as exc:
+            except Exception:
                 logger.exception(
                     "No se pudo procesar el mensaje SQS",
                     extra={"MessageId": message_id},
@@ -263,17 +272,25 @@ async def start_dispatcher(args, logger) -> None:
                 # La DLQ requiere una redrive policy configurada en SQS.
 
 
+
+
 async def start_receiver(args, logger) -> None:
-    """Inicia el servidor receptor cuando esté implementado."""
+    """Inicia el servidor receptor de webhooks."""
 
     logger.info(
-        "Inicio solicitado para el receptor",
+        "Iniciando servidor receptor",
         extra={"Host": args.host, "Port": args.port},
     )
 
-    raise NotImplementedError(
-        "Falta integrar el módulo webhook_receiver.py."
+    config = uvicorn.Config(
+        "src.vulcano_telemetry.webhook_receiver:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
     )
+
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 async def run_command(args, logger) -> None:
@@ -310,22 +327,36 @@ def main() -> int:
         logger.exception("Error de conexión con SQS")
         return 1
 
+    
     except ExceptionGroup as group:
         try:
             raise group
-        except* WebhookSignatureError:
-            logger.exception("Se detectó una firma inválida")
-        except* WebhookTimestampError:
-            logger.exception("Se detectó un timestamp inválido")
-        except* SQSConnectionError:
-            logger.exception("Se detectó un fallo de SQS")
+        except* WebhookSignatureError as errors:
+            logger.error(
+                "Se detectó una firma inválida",
+                extra={"ErrorCount": len(errors.exceptions)},
+            )
+        except* WebhookTimestampError as errors:
+            logger.error(
+                "Se detectó un timestamp inválido",
+                extra={"ErrorCount": len(errors.exceptions)},
+            )
+        except* SQSConnectionError as errors:
+            logger.error(
+                "Se detectó un fallo de SQS",
+                extra={"ErrorCount": len(errors.exceptions)},
+            )
+        except* Exception as errors:
+            logger.error(
+                "Se detectaron errores no clasificados",
+                extra={"ErrorCount": len(errors.exceptions)},
+            )
         return 1
 
     except Exception:
-        import traceback
-        traceback.print_exc()
         logger.exception("Error durante la ejecución")
         return 1
+
 
     finally:
         logging_engine.stop()
