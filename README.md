@@ -1,77 +1,168 @@
-# Vulcano Pay – Motor de Eventos
+# Vulcano Pay — Sistema de Procesamiento de Eventos y Webhooks
 
-**TP-2: Sistema de Procesamiento de Eventos, Webhooks HMAC y Observabilidad Asíncrona con Boto3 y LocalStack**
+## 1. Descripción del proyecto
 
-## Descripción del proyecto
+**Vulcano Pay** es un sistema de procesamiento asíncrono de eventos que utiliza Amazon SQS mediante Boto3 y LocalStack para simular servicios de AWS en un entorno local.
 
-Vulcano Pay es un sistema de procesamiento de eventos desarrollado en Python que permite publicar, recibir y procesar mensajes mediante colas de Amazon SQS, utilizando LocalStack como entorno de simulación local de servicios AWS.
+El proyecto permite publicar eventos en colas, procesarlos de forma asíncrona y realizar entregas de webhooks protegidas mediante firmas criptográficas HMAC.
 
-El sistema incorpora el envío de webhooks HTTP con autenticación mediante firmas HMAC, validación de mensajes, manejo de excepciones y un sistema de logging asíncrono con registros estructurados en formato JSON.
+También incorpora mecanismos de validación, manejo de excepciones y observabilidad mediante un sistema de logging asíncrono con salida estructurada en formato JSON.
 
-## Objetivos
+## 2. Objetivos
 
-- Implementar un sistema de publicación y procesamiento de eventos.
-- Integrar Amazon SQS mediante Boto3 y LocalStack.
-- Enviar webhooks HTTP con firmas HMAC.
-- Validar la autenticidad e integridad de los mensajes.
-- Implementar protección contra ataques de repetición (Replay Attacks).
-- Gestionar errores mediante excepciones personalizadas.
-- Incorporar observabilidad mediante logging asíncrono.
-- Implementar pruebas automatizadas para verificar el funcionamiento del sistema.
+- Implementar un sistema de mensajería asíncrona utilizando Amazon SQS.
+- Simular los servicios de AWS mediante LocalStack.
+- Procesar y distribuir eventos mediante webhooks.
+- Proteger las comunicaciones utilizando firmas HMAC.
+- Validar los datos recibidos y sanitizar las entradas.
+- Implementar manejo de errores y reintentos de entrega.
+- Registrar las operaciones mediante logging estructurado y asíncrono.
+- Incorporar pruebas para verificar el funcionamiento del sistema.
 
-## Tecnologías utilizadas
+## 3. Tecnologías utilizadas
 
 | Tecnología | Función |
 |---|---|
-| Python 3.14 | Lenguaje de programación |
-| Boto3 | Comunicación con servicios AWS |
+| Python 3.14 | Lenguaje principal |
+| Boto3 | Comunicación con los servicios de AWS |
 | LocalStack | Simulación local de servicios AWS |
-| Amazon SQS | Gestión de colas de mensajes |
-| FastAPI | Servidor receptor HTTP |
+| Amazon SQS | Procesamiento y almacenamiento de mensajes |
+| FastAPI | Implementación del receptor de webhooks |
 | Uvicorn | Servidor ASGI |
-| Requests | Envío de peticiones HTTP |
-| HMAC | Firma y autenticación de mensajes |
-| Asyncio | Ejecución asíncrona |
-| Pytest | Pruebas automatizadas |
-| Docker | Ejecución del entorno LocalStack |
+| Requests | Envío de solicitudes HTTP |
+| HMAC-SHA256 | Firma y verificación de mensajes |
+| Asyncio | Ejecución de operaciones asíncronas |
+| Pytest | Ejecución de pruebas |
 
-## Arquitectura del proyecto
+## 4. Arquitectura del sistema
 
-El sistema está organizado en los siguientes componentes:
+El sistema cuenta con dos flujos principales:
 
-- **core_sqs.py:** gestiona las operaciones de conexión, publicación y recepción de mensajes en SQS.
-- **webhook_receiver.py:** implementa el servidor receptor de webhooks.
-- **webhook_crypto.py:** contiene la lógica de generación y verificación de firmas HMAC.
-- **sanitizer.py:** valida y sanitiza los datos de entrada.
-- **exceptions.py:** define las excepciones personalizadas del sistema.
-- **logging_engine.py:** implementa el sistema de logging asíncrono y la rotación de archivos.
-- **app_operator.py:** coordina la aplicación, los comandos CLI y el despachador de webhooks.
+1. **Envío de eventos:** el usuario publica un evento mediante la CLI. El evento se almacena en una cola SQS y luego el dispatcher lo consume para enviarlo a un destino mediante un webhook firmado.
+2. **Recepción de webhooks:** el receptor recibe una solicitud HTTP, verifica su firma HMAC y publica el evento validado en una segunda cola SQS.
 
-## Funcionamiento general
+### Diagrama de arquitectura
 
-El flujo principal del sistema es el siguiente:
+```mermaid
+flowchart TD
+    A[Usuario / CLI] --> B[app_operator.py]
+    B --> C[produce_sqs]
+    C --> D[core_sqs.py]
+    D --> E[(SQS: vulcano-events-queue)]
+    E --> F[start_dispatcher]
+    F --> G[dispatch_webhook]
+    G --> H[Generación de firma HMAC]
+    H --> I[HTTP POST]
+    I --> J[Servidor de destino]
 
-1. El usuario ejecuta un comando desde la interfaz CLI.
-2. El evento se valida y se publica en una cola SQS.
-3. El despachador consume los mensajes de la cola.
-4. Se genera una firma HMAC para el contenido del evento.
-5. El evento se envía mediante una petición HTTP POST.
-6. Si la entrega es exitosa, el mensaje se elimina de la cola.
-7. Si ocurre un error, se registra la excepción y el mensaje puede volver a procesarse según la configuración de SQS.
+    K[Servidor externo] --> L[webhook_receiver.py]
+    L --> M[Verificación HMAC]
+    M --> N[(SQS: vulcano-webhooks-received)]
 
-El sistema receptor permite recibir webhooks y procesar los eventos entrantes.
+    B --> O[logging_engine.py]
+    F --> O
+    L --> O
+```
 
-## Requisitos previos
+Las colas `vulcano-events-queue` y `vulcano-webhooks-received` cumplen funciones diferentes: la primera recibe los eventos producidos desde la CLI y la segunda almacena los webhooks recibidos y validados.
 
-Para ejecutar el proyecto se necesita:
+## 5. Componentes principales
 
-- Python 3.14 o compatible.
+### app_operator.py
+
+Es el punto de entrada y operador principal de la aplicación.
+
+Sus responsabilidades son:
+
+- Construir la interfaz de línea de comandos utilizando `argparse`.
+- Publicar eventos en SQS.
+- Iniciar el servidor receptor de webhooks.
+- Iniciar el dispatcher encargado de consumir mensajes.
+- Generar y enviar webhooks firmados mediante HMAC.
+- Manejar excepciones y garantizar el cierre ordenado del sistema de logging.
+
+La CLI dispone de tres comandos principales:
+
+- `produce-sqs`: publica eventos en una cola SQS.
+- `start-receiver`: inicia el servidor receptor de webhooks.
+- `start-dispatcher`: inicia el procesamiento y envío de eventos.
+
+### core_sqs.py
+
+Contiene la lógica de comunicación con Amazon SQS mediante Boto3.
+
+Sus responsabilidades incluyen:
+
+- Crear el cliente de SQS.
+- Obtener las URL de las colas.
+- Enviar mensajes.
+- Recibir mensajes mediante long polling.
+- Gestionar la comunicación con LocalStack.
+
+### webhook_receiver.py
+
+Implementa el servidor receptor mediante FastAPI.
+
+El endpoint principal es:
+
+`POST /webhook`
+
+Sus responsabilidades son:
+
+- Recibir solicitudes HTTP.
+- Obtener la firma enviada en la cabecera `X-Webhook-Signature`.
+- Verificar la autenticidad del mensaje.
+- Validar el contenido recibido.
+- Publicar los eventos aceptados en la cola `vulcano-webhooks-received`.
+
+El secreto utilizado para verificar las firmas se configura mediante la variable de entorno `WEBHOOK_SECRET`.
+
+### webhook_crypto.py
+
+Contiene la lógica criptográfica utilizada para generar y verificar firmas HMAC.
+
+Permite comprobar la integridad y autenticidad de los mensajes transmitidos mediante webhooks.
+
+### sanitizer.py
+
+Contiene funciones de validación y sanitización de entradas para evitar que datos incorrectos lleguen a los componentes internos del sistema.
+
+### exceptions.py
+
+Define las excepciones personalizadas utilizadas para identificar errores específicos del sistema, entre ellas:
+
+- `VulcanoError`
+- `SQSConnectionError`
+- `QueueTimeoutError`
+- `CorruptedMessageError`
+- `WebhookSignatureError`
+- `WebhookTimestampError`
+- `WebhookDeliveryError`
+
+### logging_engine.py
+
+Implementa el sistema de observabilidad y registro de eventos.
+
+Características principales:
+
+- Logging estructurado en formato JSON.
+- Procesamiento asíncrono mediante `QueueHandler` y `QueueListener`.
+- Escritura de registros en archivos.
+- Rotación automática de logs.
+- Compresión de archivos antiguos mediante GZIP.
+- Registro de información como fecha, nivel, mensaje y datos de contexto.
+
+## 6. Requisitos previos
+
+Antes de ejecutar el proyecto se necesita:
+
+- Python 3.14 o una versión compatible con las dependencias utilizadas.
 - Docker Desktop.
 - LocalStack en ejecución.
 - Git.
-- Las dependencias definidas en `requirements.txt`.
+- Las dependencias indicadas en `requirements.txt`.
 
-## Instalación
+## 7. Instalación
 
 Clonar el repositorio:
 
@@ -91,7 +182,7 @@ Crear un entorno virtual:
 python -m venv venv
 ```
 
-Activar el entorno virtual en Windows:
+Activar el entorno virtual en Windows PowerShell:
 
 ```powershell
 .\venv\Scripts\Activate.ps1
@@ -103,117 +194,172 @@ Instalar las dependencias:
 pip install -r requirements.txt
 ```
 
-## Configuración de LocalStack
+## 8. Configuración de LocalStack
 
-Iniciar Docker Desktop y ejecutar el contenedor de LocalStack con el puerto 4566 disponible.
+LocalStack permite simular servicios de AWS de manera local, evitando la necesidad de utilizar una cuenta real de AWS para el entorno de desarrollo.
 
-Comprobar su estado:
-
-```bash
-curl http://localhost:4566/_localstack/health
-```
-
-El servicio SQS debe encontrarse disponible.
-
-La cola utilizada por defecto es:
+El servicio SQS utiliza como endpoint:
 
 ```text
-vulcano-events-queue
+http://localhost:4566
 ```
 
-La cola debe existir previamente en LocalStack. Para las pruebas de redirección a DLQ también se utiliza una configuración de redrive policy.
+La región configurada es:
 
-## Ejecución de la aplicación
+```text
+us-east-1
+```
 
-### 1. Publicar un evento en SQS
+Las credenciales utilizadas corresponden al entorno local de pruebas.
 
-```bash
+### Verificar el estado de LocalStack
+
+```powershell
+curl.exe http://localhost:4566/_localstack/health
+```
+
+Se debe comprobar que el servicio SQS se encuentre disponible.
+
+### Colas utilizadas
+
+El proyecto utiliza las siguientes colas:
+
+- `vulcano-events-queue`: recibe los eventos publicados por la CLI.
+- `vulcano-webhooks-received`: almacena los webhooks recibidos y validados.
+
+Ambas colas deben existir antes de ejecutar las operaciones correspondientes.
+
+Para habilitar el redireccionamiento de mensajes fallidos, también se debe configurar una Dead Letter Queue (DLQ) y su política de redireccionamiento en SQS.
+
+## 9. Ejecución del proyecto
+
+Los comandos deben ejecutarse desde el directorio raíz del repositorio, con el entorno virtual activado y LocalStack en funcionamiento.
+
+### 9.1 Publicar un evento en SQS
+
+```powershell
 python -m src.vulcano_telemetry.app_operator produce-sqs --message "{\"evento\":\"pago_aprobado\"}"
 ```
 
-También se puede publicar un evento desde un archivo JSON utilizando `@` seguido de su ruta.
+Este comando publica un evento de prueba en la cola principal.
 
-### 2. Iniciar el servidor receptor
+### 9.2 Iniciar el receptor de webhooks
 
-```bash
+En una terminal de PowerShell:
+
+```powershell
+$env:WEBHOOK_SECRET="CAMBIAR_POR_UN_SECRETO"
+```
+
+Luego ejecutar:
+
+```powershell
 python -m src.vulcano_telemetry.app_operator start-receiver
 ```
 
-Por defecto utiliza:
+El servidor receptor estará disponible en:
 
-- Host: `127.0.0.1`
-- Puerto: `8000`
+```text
+http://127.0.0.1:8000/webhook
+```
 
-### 3. Iniciar el despachador de webhooks
+### 9.3 Iniciar el dispatcher
 
-```bash
+En otra terminal, ejecutar:
+
+```powershell
 python -m src.vulcano_telemetry.app_operator start-dispatcher --target-url "http://127.0.0.1:8000/webhook" --secret "CAMBIAR_POR_UN_SECRETO"
 ```
 
-El despachador consume los mensajes de SQS y los envía al destino configurado.
+El dispatcher consume eventos de la cola principal y los envía al destino configurado mediante solicitudes HTTP firmadas.
 
-**Importante:** los comandos deben ejecutarse desde la raíz del repositorio. La cola debe estar creada y el destino HTTP debe estar disponible para recibir los webhooks.
+**Importante:** el secreto utilizado por el dispatcher debe coincidir con el valor configurado en `WEBHOOK_SECRET` del receptor cuando se envían los eventos a ese receptor.
 
-## Sistema de seguridad
+El dispatcher utiliza la cola principal y el receptor publica los mensajes aceptados en una cola diferente. De esta manera se evita que el mismo flujo procese indefinidamente sus propios mensajes.
 
-El proyecto incorpora mecanismos de seguridad:
+## 10. Seguridad
 
-- Firmas HMAC para verificar la autenticidad de los mensajes.
-- Marca de tiempo (timestamp) para validar la antigüedad de los mensajes.
-- Protección contra ataques de repetición.
-- Sanitización de argumentos y validación de datos.
-- Excepciones personalizadas para identificar errores específicos.
+El sistema incorpora mecanismos de seguridad para proteger la comunicación entre componentes:
 
-## Observabilidad y logging
+- Firmas criptográficas HMAC-SHA256.
+- Verificación de firmas recibidas.
+- Validación de marcas de tiempo.
+- Validación y sanitización de entradas.
+- Manejo de excepciones específicas.
+- Uso de variables de entorno para configurar secretos.
 
-El sistema utiliza un motor de logging asíncrono que permite registrar los eventos sin bloquear el procesamiento principal.
+Los secretos utilizados en un entorno real deben mantenerse fuera del código fuente y no deben publicarse en el repositorio.
 
-Entre sus características se encuentran:
+## 11. Manejo de errores y reintentos
 
-- Registros estructurados en formato JSON.
-- Identificación de eventos mediante identificadores.
-- Registro de excepciones y trazas.
-- Procesamiento mediante QueueHandler y QueueListener.
-- Rotación automática de archivos de registro.
-- Compresión de archivos antiguos mediante GZIP.
+El sistema utiliza excepciones personalizadas para identificar distintos problemas durante el procesamiento.
 
-## Pruebas automatizadas
+Entre los errores contemplados se encuentran:
+
+- Fallas de conexión con SQS.
+- Tiempo de espera de las colas.
+- Mensajes corruptos.
+- Firmas HMAC inválidas.
+- Marcas de tiempo incorrectas.
+- Errores durante la entrega de webhooks.
+
+Cuando la entrega de un webhook falla, el mensaje no se elimina de la cola principal, permitiendo que SQS pueda volver a entregarlo según su configuración.
+
+La Dead Letter Queue permite redireccionar mensajes que superan la cantidad de intentos configurada.
+
+## 12. Observabilidad y logging
+
+El sistema incorpora un motor de logging asíncrono para registrar las operaciones sin bloquear innecesariamente el procesamiento principal.
+
+Los registros se almacenan en formato JSON e incluyen información contextual para facilitar el diagnóstico de errores.
+
+También se implementa rotación de archivos y compresión GZIP para administrar el almacenamiento de logs.
+
+El cierre del sistema de logging se realiza de manera ordenada para garantizar que los registros pendientes puedan procesarse.
+
+## 13. Ejecución de pruebas
 
 Para ejecutar las pruebas del proyecto:
 
-```bash
+```powershell
 python -m pytest -v
 ```
 
-Las pruebas verifican:
+Las pruebas permiten verificar distintos comportamientos del sistema, incluyendo:
 
-- Rechazo de firmas inválidas.
-- Protección contra timestamps vencidos y ataques de repetición.
-- Redirección de mensajes fallidos a una Dead Letter Queue (DLQ).
-- Estructura de los registros JSON.
-- Rotación y descompresión de archivos de logging.
+- Procesamiento de eventos.
+- Validación de mensajes.
+- Manejo de errores.
+- Verificación de firmas.
+- Redireccionamiento de mensajes fallidos a la DLQ.
 
-## Resultados de las pruebas
+**Última ejecución registrada durante el desarrollo:** 5 pruebas aprobadas (`5 passed`). El resultado puede variar según el entorno y la configuración de LocalStack.
 
-En la última ejecución realizada durante el desarrollo del proyecto se obtuvieron los siguientes resultados:
+## 14. API pública del paquete
 
-- 5 pruebas superadas.
-- 0 pruebas fallidas.
+El archivo `src/vulcano_telemetry/__init__.py` define las excepciones disponibles para su importación desde el paquete.
 
-## Integración y trabajo colaborativo
+Esto permite mantener una interfaz pública organizada y facilita la reutilización de las excepciones en otros módulos.
 
-El proyecto fue desarrollado de manera colaborativa, distribuyendo las responsabilidades entre los integrantes del equipo.
+## 15. Repositorio
 
-Cada integrante trabajó sobre componentes específicos del sistema, que posteriormente fueron integrados en el repositorio principal.
+Proyecto desarrollado de manera colaborativa como parte del trabajo práctico de procesamiento de eventos, webhooks HMAC y observabilidad asíncrona.
 
-## Repositorio
+**GitHub:**
 
-[GitHub – Vulcano Engine](https://github.com/SantiS156/vulcano_engine)
+https://github.com/SantiS156/vulcano_engine
 
 ---
 
-**Proyecto académico – TP-2**
 
-Sistema de Procesamiento de Eventos, Webhooks HMAC y Observabilidad Asíncrona con Boto3 y LocalStack.
+## Integrantes del proyecto
 
-**Proyecto: Vulcano Pay**
+- **Santiago Ezequiel Sosa**
+- **Rocio Ayelen Lopez**
+- **Mendez Mateo Joaquin**
+- **Alex Cruz Vargas**
+- **Joel Lamas**
+
+
+**Proyecto Vulcano Pay**  
+Sistema de Procesamiento de Eventos, Webhooks HMAC y Observabilidad Asíncrona.
