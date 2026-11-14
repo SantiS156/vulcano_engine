@@ -1,98 +1,278 @@
-import time
-import pytest
-import boto3
+
 import json
+import time
+import uuid
+
+import pytest
 from botocore.exceptions import ClientError
 
-from src.vulcano_telemetry.webhook_crypto import generate_signature
-from src.vulcano_telemetry.exceptions import (
+from vulcano_telemetry.webhook_crypto import (
+    generate_signature,
+    verify_signature
+)
+
+from vulcano_telemetry.exceptions import (
     WebhookSignatureError,
     WebhookTimestampError,
-    SQSConnectionError,
+    SQSConnectionError
 )
-from src.vulcano_telemetry.core_sqs import get_sqs_client, send_event, receive_events
+
+from vulcano_telemetry.core_sqs import (
+    get_sqs_client,
+    send_event
+)
+
+
+SECRET_KEY = "secret-key-for-testing"
+PAYLOAD = b'{"payment_id":"PAY-001","status":"approved"}'
 
 
 @pytest.fixture
 def localstack_sqs():
-    endpoint = "http://localhost:4566"
+    """
+    Comprueba la conexión con LocalStack.
+    Si el servicio no está disponible, omite las pruebas
+    que necesitan una instancia real de SQS.
+    """
+    client = get_sqs_client(
+        endpoint_url="http://localhost:4566"
+    )
+
     try:
-        client = get_sqs_client(endpoint)
         client.list_queues()
-        return client
-    except Exception as exc:
-        pytest.skip(f"LocalStack no está disponible en {endpoint}: {exc}")
+
+    except Exception as error:
+        pytest.skip(
+            f"LocalStack no está disponible: {error}"
+        )
+
+    return client
 
 
 def test_invalid_signature_rejection():
-    secret = "clave-secreta-super-larga-123456"
+    """
+    Comprueba que una firma HMAC modificada sea rechazada.
+    """
     timestamp = int(time.time())
-    payload = b'{"event":"payment.successful","amount":100.50}'
-    
-    valid_signature = generate_signature(secret, timestamp, payload)
-    corrupted_signature = "a" * len(valid_signature)
-    
-    header_value = f"t={timestamp},v1={corrupted_signature}"
-    
-    from src.vulcano_telemetry.webhook_crypto import verify_signature
-    
+
+    valid_signature = generate_signature(
+        SECRET_KEY,
+        timestamp,
+        PAYLOAD
+    )
+
+    invalid_signature = (
+        valid_signature.rsplit("v1=", 1)[0]
+        + "v1="
+        + ("0" * 64)
+    )
+
     with pytest.raises(WebhookSignatureError):
-        verify_signature(secret, header_value, payload, tolerance_sec=300)
+        verify_signature(
+            SECRET_KEY,
+            invalid_signature,
+            PAYLOAD,
+            tolerance_sec=300
+        )
+
+
+def test_valid_signature_accepted():
+    """
+    Comprueba que una firma HMAC válida y vigente sea aceptada.
+    """
+    timestamp = int(time.time())
+
+    signature = generate_signature(
+        SECRET_KEY,
+        timestamp,
+        PAYLOAD
+    )
+
+    verify_signature(
+        SECRET_KEY,
+        signature,
+        PAYLOAD,
+        tolerance_sec=300
+    )
 
 
 def test_expired_timestamp_replay_attack():
-    secret = "clave-secreta-super-larga-123456"
+    """
+    Comprueba que se rechace una firma con timestamp vencido.
+    Simula un intento de reutilización de una solicitud antigua.
+    """
     old_timestamp = int(time.time()) - 3600
-    payload = b'{"event":"payment.expired","amount":50.00}'
-    
-    signature = generate_signature(secret, old_timestamp, payload)
-    header_value = f"t={old_timestamp},v1={signature}"
-    
-    from src.vulcano_telemetry.webhook_crypto import verify_signature
-    
+
+    old_signature = generate_signature(
+        SECRET_KEY,
+        old_timestamp,
+        PAYLOAD
+    )
+
     with pytest.raises(WebhookTimestampError):
-        verify_signature(secret, header_value, payload, tolerance_sec=300)
+        verify_signature(
+            SECRET_KEY,
+            old_signature,
+            PAYLOAD,
+            tolerance_sec=300
+        )
 
 
-def test_poison_message_dlq_redirection(localstack_sqs):
-    queue_name_base = f"vulcano-test-{int(time.time())}"
-    main_queue_name = f"{queue_name_base}-queue"
-    dlq_name = f"{queue_name_base}-dlq"
-    
+def test_sqs_publication_failure():
+    """
+    Comprueba que un error de publicación en SQS se convierta
+    en SQSConnectionError y conserve su causa original.
+    """
+
+    class FakeSQSClient:
+        def send_message(self, **kwargs):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "ServiceUnavailable",
+                        "Message": "Fallo simulado de SQS"
+                    }
+                },
+                "SendMessage"
+            )
+
+    fake_client = FakeSQSClient()
+
+    with pytest.raises(SQSConnectionError) as captured:
+        send_event(
+            sqs_client=fake_client,
+            queue_url="http://localhost:4566/000000000000/test-queue",
+            event_data={
+                "payment_id": "PAY-001",
+                "status": "approved"
+            },
+            trace_id="trace-chaos-001"
+        )
+
+    error = captured.value
+
+    assert isinstance(error.__cause__, ClientError)
+
+    assert any(
+        "QueueUrl intentada" in note
+        for note in getattr(error, "__notes__", [])
+    )
+
+
+def test_sqs_invalid_message_redrive_to_dlq(localstack_sqs):
+    """
+    Comprueba el mecanismo RedrivePolicy de SQS en LocalStack.
+    Envía un mensaje JSON inválido, lo recibe sin eliminarlo
+    y verifica que termine en la Dead Letter Queue.
+
+    Esta prueba verifica el redrive de SQS, no la ejecución
+    del worker real de Vulcano Pay.
+    """
+    client = localstack_sqs
+
+    unique_id = uuid.uuid4().hex[:10]
+
+    main_queue_name = f"chaos-main-{unique_id}"
+    dlq_name = f"chaos-dlq-{unique_id}"
+
+    main_queue_url = None
+    dlq_url = None
+
     try:
-        dlq_response = localstack_sqs.create_queue(QueueName=dlq_name)
-        dlq_arn = localstack_sqs.get_queue_attributes(
-            QueueUrl=dlq_response["QueueUrl"], AttributeNames=["QueueArn"]
-        )["Attributes"]["QueueArn"]
-        
-        redrive_policy = json.dumps({
+        dlq_response = client.create_queue(
+            QueueName=dlq_name
+        )
+
+        dlq_url = dlq_response["QueueUrl"]
+
+        dlq_attributes = client.get_queue_attributes(
+            QueueUrl=dlq_url,
+            AttributeNames=["QueueArn"]
+        )
+
+        dlq_arn = dlq_attributes["Attributes"]["QueueArn"]
+
+        redrive_policy = {
             "deadLetterTargetArn": dlq_arn,
             "maxReceiveCount": "1"
-        })
-        
-        main_queue_response = localstack_sqs.create_queue(
+        }
+
+        main_response = client.create_queue(
             QueueName=main_queue_name,
-            Attributes={"RedrivePolicy": redrive_policy}
+            Attributes={
+                "VisibilityTimeout": "1",
+                "RedrivePolicy": json.dumps(redrive_policy)
+            }
         )
-        main_queue_url = main_queue_response["QueueUrl"]
-        
-        poison_payload = {"error": "corrupted_payload_structure"}
-        send_event(localstack_sqs, main_queue_url, poison_payload, trace_id="chaos-trace-01")
-        
-        messages = receive_events(localstack_sqs, main_queue_url, wait_time=2)
+
+        main_queue_url = main_response["QueueUrl"]
+
+        invalid_body = '{"event":"payment.failed"'
+
+        client.send_message(
+            QueueUrl=main_queue_url,
+            MessageBody=invalid_body
+        )
+
+        first_receive = client.receive_message(
+            QueueUrl=main_queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=1,
+            AttributeNames=["ApproximateReceiveCount"]
+        )
+
+        messages = first_receive.get("Messages", [])
+
         assert len(messages) == 1
-        
-        msg = messages[0]
-        assert msg["Body"] is not None
-        
-    finally:
-        try:
-            q_url = localstack_sqs.get_queue_url(QueueName=main_queue_name)["QueueUrl"]
-            localstack_sqs.delete_queue(QueueUrl=q_url)
-        except Exception:
-            pass
-        try:
-            dlq_url = localstack_sqs.get_queue_url(QueueName=dlq_name)["QueueUrl"]
-            localstack_sqs.delete_queue(QueueUrl=dlq_url)
-        except Exception:
-            pass
+        assert messages[0]["Body"] == invalid_body
+
+        receive_count = int(
+            messages[0]["Attributes"]["ApproximateReceiveCount"]
+        )
+
+        assert receive_count == 1
+
+        time.sleep(2)
+
+        for _ in range(5):
+            response = client.receive_message(
+                QueueUrl=main_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=1,
+                AttributeNames=["ApproximateReceiveCount"]
+            )
+
+            if not response.get("Messages"):
+                break
+
+            time.sleep(2)
+
+       
+        dlq_message = None
+
+        for _ in range(10):
+            response = client.receive_message(
+                QueueUrl=dlq_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=1
+            )
+
+            received_messages = response.get("Messages", [])
+            if received_messages:
+                dlq_message = received_messages[0]
+                break
+        assert dlq_message is not None, (
+            "El mensaje no apareció en la Dead Letter Queue."
+        )
+        assert dlq_message["Body"] == invalid_body
+
+    finally:       
+        if main_queue_url:
+            client.delete_queue(
+                QueueUrl=main_queue_url
+            )
+
+        if dlq_url:
+            client.delete_queue(
+                QueueUrl=dlq_url
+            )
