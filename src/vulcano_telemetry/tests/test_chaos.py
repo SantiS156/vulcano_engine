@@ -29,11 +29,6 @@ PAYLOAD = b'{"payment_id":"PAY-001","status":"approved"}'
 
 @pytest.fixture
 def localstack_sqs():
-    """
-    Comprueba la conexión con LocalStack.
-    Si el servicio no está disponible, omite las pruebas
-    que necesitan una instancia real de SQS.
-    """
     client = get_sqs_client(
         endpoint_url="http://localhost:4566"
     )
@@ -50,9 +45,6 @@ def localstack_sqs():
 
 
 def test_invalid_signature_rejection():
-    """
-    Comprueba que una firma HMAC modificada sea rechazada.
-    """
     timestamp = int(time.time())
 
     valid_signature = generate_signature(
@@ -77,9 +69,6 @@ def test_invalid_signature_rejection():
 
 
 def test_valid_signature_accepted():
-    """
-    Comprueba que una firma HMAC válida y vigente sea aceptada.
-    """
     timestamp = int(time.time())
 
     signature = generate_signature(
@@ -97,10 +86,6 @@ def test_valid_signature_accepted():
 
 
 def test_expired_timestamp_replay_attack():
-    """
-    Comprueba que se rechace una firma con timestamp vencido.
-    Simula un intento de reutilización de una solicitud antigua.
-    """
     old_timestamp = int(time.time()) - 3600
 
     old_signature = generate_signature(
@@ -119,10 +104,6 @@ def test_expired_timestamp_replay_attack():
 
 
 def test_sqs_publication_failure():
-    """
-    Comprueba que un error de publicación en SQS se convierta
-    en SQSConnectionError y conserve su causa original.
-    """
 
     class FakeSQSClient:
         def send_message(self, **kwargs):
@@ -160,14 +141,6 @@ def test_sqs_publication_failure():
 
 
 def test_sqs_invalid_message_redrive_to_dlq(localstack_sqs):
-    """
-    Comprueba el mecanismo RedrivePolicy de SQS en LocalStack.
-    Envía un mensaje JSON inválido, lo recibe sin eliminarlo
-    y verifica que termine en la Dead Letter Queue.
-
-    Esta prueba verifica el redrive de SQS, no la ejecución
-    del worker real de Vulcano Pay.
-    """
     client = localstack_sqs
 
     unique_id = uuid.uuid4().hex[:10]
